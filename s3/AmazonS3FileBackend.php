@@ -551,7 +551,7 @@ class AmazonS3FileBackend extends FileBackendStore {
 	}
 
 	/**
-	 * Returns memcached key used by doGetFileStat()/invalidateFileStatCache()
+	 * Returns memcached key used by doGetFileStat() and invalidateCacheFor().
 	 * @param string $src
 	 * @return string
 	 */
