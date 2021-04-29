@@ -85,6 +85,7 @@ class AmazonS3Hooks {
 			'zones'             => array_fill_keys( $zones, [ 'url' => false ] )
 		];
 
+		/*
 		if ( AmazonS3CompatTools::isPublicWiki() ) {
 			// Not a private wiki: $publicZones must have an URL
 			foreach ( $publicZones as $zone ) {
@@ -93,12 +94,13 @@ class AmazonS3Hooks {
 				];
 			}
 		} else {
+		*/
 			// Private wiki: $publicZones must use img_auth.php
 			foreach ( $publicZones as $zone ) {
 				// Use default value from $wgLocalFileRepo['url']
 				unset( $wgLocalFileRepo['zones'][$zone]['url'] );
 			}
-		}
+		// }
 
 		// Container names are prefixed by wfWikiID(), which depends on $wgDBPrefix and $wgDBname.
 		$wikiId = wfWikiID();
