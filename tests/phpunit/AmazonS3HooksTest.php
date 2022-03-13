@@ -27,9 +27,10 @@
  */
 class AmazonS3HooksTest extends MediaWikiTestCase {
 
+	/** @var array */
 	protected $untouchedFakeLocalRepo = [ 'untouched' => 'marker' ];
 
-	public function setUp() : void {
+	public function setUp(): void {
 		parent::setUp();
 
 		$this->setMwGlobals( [
@@ -108,7 +109,7 @@ class AmazonS3HooksTest extends MediaWikiTestCase {
 			'class' => 'AmazonS3FileBackend',
 			'lockManager' => 'nullLockManager',
 		];
-		$wikiId = wfWikiID();
+		$wikiId = WikiMap::getCurrentWikiId();
 		if ( $wgAWSBucketName ) {
 			// 1 bucket (modern configuration)
 			$expectedBackend['containerPaths'] = [

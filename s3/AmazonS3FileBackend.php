@@ -50,12 +50,6 @@ class AmazonS3FileBackend extends FileBackendStore {
 	private $encryption;
 
 	/**
-	 * Whether to use HTTPS for communicating with Amazon
-	 * @var bool
-	 */
-	private $useHTTPS;
-
-	/**
 	 * @var array
 	 * Maps names of containers (e.g. mywiki-local-thumb) to "mybucket/some/path", where "mybucket"
 	 * is the name of S3 bucket, and "some/path" is the "top directory" prefix of S3 object names.
@@ -117,15 +111,8 @@ class AmazonS3FileBackend extends FileBackendStore {
 
 		parent::__construct( $config );
 
-		$this->encryption = isset( $config['awsEncryption'] ) ? (bool)$config['awsEncryption'] : false;
-
-		if ( $this->encryption ) {
-			$this->useHTTPS = true;
-		} elseif ( isset( $config['awsHttps'] ) ) {
-			$this->useHTTPS = (bool)$config['awsHttps'];
-		} else {
-			$this->useHTTPS = (bool)$wgAWSUseHTTPS;
-		}
+		$this->encryption = (bool)( $config['awsEncryption'] ?? false );
+		$useHTTPS = $this->encryption ? true : (bool)( $config['awsHttps'] ?? $wgAWSUseHTTPS );
 
 		if ( isset( $config['shardViaHashLevels'] ) ) {
 			$this->shardViaHashLevels = $config['shardViaHashLevels'];
@@ -139,7 +126,7 @@ class AmazonS3FileBackend extends FileBackendStore {
 		$params = [
 			'version' => '2006-03-01',
 			'region' => $config['awsRegion'] ?? $wgAWSRegion,
-			'scheme' => $this->useHTTPS ? 'https' : 'http'
+			'scheme' => $useHTTPS ? 'https' : 'http'
 		];
 		if ( !empty( $wgAWSCredentials['key'] ) ) {
 			$params['credentials'] = $wgAWSCredentials;
@@ -164,16 +151,12 @@ class AmazonS3FileBackend extends FileBackendStore {
 				__METHOD__ . " : containerPaths array must be set for S3." );
 		}
 
-		if ( isset( $config['privateWiki'] ) ) {
-			/* Explicitly set in LocalSettings.php ($wgLocalFileRepo) */
-			$this->privateWiki = $config['privateWiki'];
-		} else {
-			/* If anonymous users aren't allowed to read articles,
-				then we assume that this wiki is private,
-				and that we want files to be "for registered users only".
-			*/
-			$this->privateWiki = !AmazonS3CompatTools::isPublicWiki();
-		}
+		/*
+			In "privateWiki" mode, all files are "for registered users only".
+			This mode can be explicitly enabled/disabled in LocalSettings.php.
+			Default: if anonymous users aren't allowed to read articles, then we assume private mode.
+		*/
+		$this->privateWiki = $config['privateWiki'] ?? !AmazonS3CompatTools::isPublicWiki();
 
 		$this->logger->info(
 			'S3FileBackend: found backend with S3 buckets: {buckets}.{isPrivateWiki}',
@@ -276,50 +259,31 @@ class AmazonS3FileBackend extends FileBackendStore {
 		return [ $bucket, $restrictFile ];
 	}
 
-	// phpcs:disable Generic.Files.LineLength.TooLong
-
 	/**
-	 * Create a new S3 object.
+	 * Create a new S3 object, used by both doCreateInternal() and doStoreInternal().
 	 * @param array $params
+	 * @param string $sha1 Checksum of this file.
+	 * @param string $contentType Correct (explicitly known or guessed) MIME type of this file.
 	 * @return Status
 	 *
-	 * @phan-param array{content:string|resource,src?:string,dst:string,headers?:array<string,string>} $params
+	 * @phan-param array{content:string|resource,dst:string,headers?:array<string,string>} $params
 	 */
-	protected function doCreateInternal( array $params ) {
-		// phpcs:enable Generic.Files.LineLength.TooLong
-
+	protected function createOrStore( array $params, $sha1, $contentType ) {
 		list( $bucket, $key, $container ) = $this->getBucketAndObject( $params['dst'] );
 
 		if ( $bucket === null || $key == null ) {
 			return Status::newFatal( 'backend-fail-invalidpath', $params['dst'] );
 		}
 
-		$contentType = $params['headers']['Content-Type'] ?? null;
-
-		if ( is_resource( $params['content'] ) && isset( $params['src'] ) ) {
-			// If we are here, it means that doCreateInternal() was called from doStoreInternal().
-			$sha1 = sha1_file( $params['src'] );
-			if ( !$contentType ) {
-				// Guess the MIME type from filename.
-				$contentType = $this->getContentType( $params['dst'], null, $params['src'] );
-			}
-		} else {
-			$sha1 = sha1( $params['content'] );
-			if ( !$contentType ) {
-				// Guess the MIME type from contents.
-				$contentType = $this->getContentType( $params['dst'], $params['content'], null );
-			}
-		}
-
 		$sha1Hash = Wikimedia\base_convert( $sha1, 16, 36, 31, true, 'auto' );
 
 		$params['headers'] = $params['headers'] ?? [];
 		$params['headers'] += array_fill_keys( [
-			'Cache-Control',
-			'Content-Disposition',
-			'Content-Encoding',
-			'Content-Language',
-			'Expires'
+			'cache-control',
+			'content-disposition',
+			'content-encoding',
+			'content-language',
+			'expires'
 		], null );
 
 		$this->logger->debug(
@@ -341,12 +305,12 @@ class AmazonS3FileBackend extends FileBackendStore {
 				'ACL' => $this->isSecure( $container ) ? 'private' : 'public-read',
 				'Body' => $params['content'],
 				'Bucket' => $bucket,
-				'CacheControl' => $params['headers']['Cache-Control'],
-				'ContentDisposition' => $params['headers']['Content-Disposition'],
-				'ContentEncoding' => $params['headers']['Content-Encoding'],
-				'ContentLanguage' => $params['headers']['Content-Language'],
+				'CacheControl' => $params['headers']['cache-control'],
+				'ContentDisposition' => $params['headers']['content-disposition'],
+				'ContentEncoding' => $params['headers']['content-encoding'],
+				'ContentLanguage' => $params['headers']['content-language'],
 				'ContentType' => $contentType,
-				'Expires' => $params['headers']['Expires'],
+				'Expires' => $params['headers']['expires'],
 				'Key' => $key,
 				'Metadata' => [ 'sha1base36' => $sha1Hash ],
 				'ServerSideEncryption' => $this->encryption ? 'AES256' : null,
@@ -364,30 +328,45 @@ class AmazonS3FileBackend extends FileBackendStore {
 	}
 
 	/**
-	 * Same as doCreateInternal(), but the source is a local file, not variable in memory.
+	 * Create a new S3 object from a string with its contents.
+	 * @param array $params
+	 * @return Status
+	 *
+	 * @phan-param array{content:string,dst:string,headers?:array<string,string>} $params
+	 */
+	protected function doCreateInternal( array $params ) {
+		$sha1 = sha1( $params['content'] );
+		$contentType = $params['headers']['content-type'] ??
+			$this->getContentType( $params['dst'], $params['content'], null );
+
+		return $this->createOrStore( $params, $sha1, $contentType );
+	}
+
+	/**
+	 * Create a new S3 object from a local file.
 	 * @param array $params
 	 * @return Status
 	 *
 	 * @phan-param array{src:string,dst:string,headers?:array<string,string>} $params
 	 */
 	protected function doStoreInternal( array $params ) {
-		// Supply the open file to doCreateInternal() and have it do the rest.
 		$params['content'] = fopen( $params['src'], 'r' );
-		return $this->doCreateInternal( $params );
-	}
+		$sha1 = sha1_file( $params['src'] );
+		$contentType = $params['headers']['content-type'] ??
+			$this->getContentType( $params['dst'], null, $params['src'] );
 
-	// phpcs:disable Generic.Files.LineLength.TooLong
+		return $this->createOrStore( $params, $sha1, $contentType );
+	}
 
 	/**
 	 * Copy an existing S3 object into another S3 object.
 	 * @param array $params
 	 * @return Status
 	 *
+	 * phpcs:ignore Generic.Files.LineLength.TooLong
 	 * @phan-param array{src:string,dst:string,headers?:array<string,string>,ignoreMissingSource?:bool} $params
 	 */
 	protected function doCopyInternal( array $params ) {
-		// phpcs:enable Generic.Files.LineLength.TooLong
-
 		$status = Status::newGood();
 
 		list( $srcBucket, $srcKey, ) = $this->getBucketAndObject( $params['src'] );
@@ -417,14 +396,14 @@ class AmazonS3FileBackend extends FileBackendStore {
 
 		$params['headers'] = $params['headers'] ?? [];
 		$params['headers'] += array_fill_keys( [
-			'Cache-Control',
-			'Content-Disposition',
-			'Content-Encoding',
-			'Content-Language',
-			'Content-Type',
-			'Expires',
-			'E-Tag',
-			'If-Modified-Since'
+			'cache-control',
+			'content-disposition',
+			'content-encoding',
+			'content-language',
+			'content-type',
+			'expires',
+			'e-tag',
+			'if-modified-since'
 		], null );
 
 		$profiling = new AmazonS3ProfilingAssist( "copying S3 object $srcKey to $dstKey" );
@@ -434,15 +413,15 @@ class AmazonS3FileBackend extends FileBackendStore {
 			return $this->client->copyObject( array_filter( [
 				'ACL' => $this->isSecure( $dstContainer ) ? 'private' : 'public-read',
 				'Bucket' => $dstBucket,
-				'CacheControl' => $params['headers']['Cache-Control'],
-				'ContentDisposition' => $params['headers']['Content-Disposition'],
-				'ContentEncoding' => $params['headers']['Content-Encoding'],
-				'ContentLanguage' => $params['headers']['Content-Language'],
-				'ContentType' => $params['headers']['Content-Type'],
+				'CacheControl' => $params['headers']['cache-control'],
+				'ContentDisposition' => $params['headers']['content-disposition'],
+				'ContentEncoding' => $params['headers']['content-encoding'],
+				'ContentLanguage' => $params['headers']['content-language'],
+				'ContentType' => $params['headers']['content-type'],
 				'CopySource' => $srcBucket . '/' . $this->client->encodeKey( $srcKey ),
-				'CopySourceIfMatch' => $params['headers']['E-Tag'],
-				'CopySourceIfModifiedSince' => $params['headers']['If-Modified-Since'],
-				'Expires' => $params['headers']['Expires'],
+				'CopySourceIfMatch' => $params['headers']['e-tag'],
+				'CopySourceIfModifiedSince' => $params['headers']['if-modified-since'],
+				'Expires' => $params['headers']['expires'],
 				'Key' => $dstKey,
 				'MetadataDirective' => 'COPY',
 				'ServerSideEncryption' => $this->encryption ? 'AES256' : null
@@ -630,16 +609,12 @@ class AmazonS3FileBackend extends FileBackendStore {
 			return false;
 		}
 
-		$sha1 = '';
-		if ( isset( $res['Metadata']['sha1base36'] ) ) {
-			$sha1 = $res['Metadata']['sha1base36'];
-		}
-
 		return [
 			'mtime' => wfTimestamp( TS_MW, $res['LastModified'] ),
 			'size' => (int)$res['ContentLength'],
 			'etag' => $res['Etag'],
-			'sha1' => $sha1
+			// @phan-suppress-next-line PhanTypeMismatchDimFetch - false positive
+			'sha1' => $res['Metadata']['sha1base36'] ?? ''
 		];
 	}
 

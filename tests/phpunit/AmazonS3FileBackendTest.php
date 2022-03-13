@@ -19,6 +19,7 @@
  * Integration test for AmazonS3FileBackend.
  */
 
+use MediaWiki\MediaWikiServices;
 use Wikimedia\TestingAccessWrapper;
 
 /**
@@ -30,17 +31,36 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 	/** @var TestingAccessWrapper Proxy to AmazonS3FileBackend */
 	private static $backend;
 
-	public static function setUpBeforeClass() : void {
+	public static function setUpBeforeClass(): void {
 		global $wgFileBackends;
+		$services = MediaWikiServices::getInstance();
+
 		if ( getenv( 'USE_MOCK' ) ) {
 			// Point to a local Moto server (AWS-mocking daemon)
 			$wgFileBackends['s3']['endpoint'] = 'http://127.0.0.1:3000';
-			FileBackendGroup::destroySingleton();
+			$services->resetServiceForTesting( 'FileBackendGroup' );
 		}
 
 		self::$backend = TestingAccessWrapper::newFromObject(
-			FileBackendGroup::singleton()->get( 'AmazonS3' )
+			$services->getFileBackendGroup()->get( 'AmazonS3' )
 		);
+	}
+
+	/**
+	 * Workaround for Http::get() not being allowed in tests.
+	 * We have Moto server providing the mock of AWS S3, reimplementing it in PHP is unneeded/suboptimal.
+	 * @param string $url
+	 * @return string|false
+	 */
+	private function httpGet( $url ) {
+		$options = [ 'method' => 'GET', 'timeout' => 25, 'connectTimeout' => 5 ];
+		$request = new GuzzleHttpRequest( $url, $options, __METHOD__ );
+		$status = $request->execute();
+		if ( !$status->isOK() ) {
+			return false;
+		}
+
+		return $request->getContent();
 	}
 
 	/**
@@ -62,9 +82,10 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 	/**
 	 * Translate "Hello/world.txt" to mw:// pseudo-URL.
 	 * @param string $filename
+	 * @return string
 	 */
 	private function getVirtualPath( $filename ) {
-		$repo = RepoGroup::singleton()->getLocalRepo();
+		$repo = MediaWikiServices::getInstance()->getRepoGroup()->getLocalRepo();
 		return $repo->getZonePath( getenv( 'AWS_S3_TEST_ZONE' ) ?: 'public' ) . '/' .
 			$repo->newFile( $filename )->getRel();
 	}
@@ -133,7 +154,7 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 		$url = $this->getBackend()->getFileHttpUrl( [ 'src' => $params['dst'] ] );
 		$this->assertNotNull( $url, 'No URL returned by getFileHttpUrl()' );
 
-		$content = Http::get( $url );
+		$content = $this->httpGet( $url );
 		$this->assertEquals( $params['content'], $content,
 			'Content downloaded from FileHttpUrl is different from expected' );
 	}
@@ -178,6 +199,7 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 	 * List of files that must be created before testList().
 	 * @see listingTestsDataProvider
 	 * @see testList
+	 * @return string[]
 	 */
 	public function getFilenamesForListTest() {
 		return [
@@ -351,7 +373,7 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 		$url = $this->getBackend()->getFileHttpUrl( [ 'src' => $dst ] );
 		$this->assertNotNull( $url, 'No URL returned by getFileHttpUrl()' );
 
-		$content = Http::get( $url );
+		$content = $this->httpGet( $url );
 		$this->assertEquals( $expectedContent, $content,
 			'Content downloaded from FileHttpUrl is different from expected' );
 	}
@@ -432,7 +454,7 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 			# if the ACL of this object is not PUBLIC_READ.
 			list( $bucket, $prefix ) = $this->getBackend()->findContainer( $container );
 			$url = $this->getClient()->getObjectUrl( $bucket, $prefix . $key );
-			$securityAfterTest = ( Http::get( $url ) === false );
+			$securityAfterTest = ( $this->httpGet( $url ) === false );
 
 			$this->assertEquals( $expectedSecurity, $securityAfterTest,
 				"Incorrect ACL: S3 Object uploaded after $method() is " .
@@ -451,12 +473,12 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 	}
 
 	/**
-	 * Verify that uploaded S3 objects have a correct Content-Type header.
+	 * Verify that uploaded S3 objects have correct 1) Content-Type header, 2) "sha1base36" metadata.
 	 * @dataProvider contentTypeDataProvider
 	 * @covers AmazonS3FileBackend::doCreateInternal
 	 * @covers AmazonS3FileBackend::doStoreInternal
 	 */
-	public function testContentType( $method, $filename, $expectedContentType ) {
+	public function testContentType( $method, $filename, $expectedContentType, $expectedSha1Base36 ) {
 		$src = __DIR__ . "/../resources/$filename";
 		if ( !file_exists( $src ) ) {
 			throw new MWException( __METHOD__ . ": file $src not found (needed for the test)." );
@@ -490,6 +512,9 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 		] );
 		$this->assertArrayHasKey( 'ContentType', $response );
 		$this->assertEquals( $expectedContentType, $response['ContentType'] );
+
+		$this->assertArrayHasKey( 'sha1base36', $response['Metadata'] );
+		$this->assertEquals( $expectedSha1Base36, $response['Metadata']['sha1base36'] );
 	}
 
 	/**
@@ -497,10 +522,10 @@ class AmazonS3FileBackendTest extends MediaWikiTestCase {
 	 */
 	public function contentTypeDataProvider() {
 		return [
-			[ 'doCreateInternal', 'blank.png',  'image/png' ],
-			[ 'doStoreInternal', 'blank.png',  'image/png' ],
-			[ 'doStoreInternal', 'text.txt',  'text/plain' ],
-			[ 'doCreateInternal', 'text.txt',  'text/plain' ]
+			[ 'doCreateInternal', 'blank.png',  'image/png', 'hcuidxu8r3jvhby9kd569py2lfeqlxs' ],
+			[ 'doStoreInternal', 'blank.png',  'image/png', 'hcuidxu8r3jvhby9kd569py2lfeqlxs' ],
+			[ 'doStoreInternal', 'text.txt',  'text/plain', '1jqz0c1p0v6ieg9r3b6y60cqb4hb07b' ],
+			[ 'doCreateInternal', 'text.txt',  'text/plain', '1jqz0c1p0v6ieg9r3b6y60cqb4hb07b' ]
 		];
 	}
 }
